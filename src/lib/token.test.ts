@@ -58,5 +58,13 @@ describe("Token Generation & Verification Utility", () => {
 
             expect(recomputedHash).toBe(hashedToken);
         });
+
+        it("should preserve existing familyId when provided during rotation", () => {
+            const initial = generateRefreshToken();
+            const rotated = generateRefreshToken(initial.familyId);
+            expect(rotated.familyId).toBe(initial.familyId);
+            expect(rotated.rawToken).not.toBe(initial.rawToken);
+            expect(rotated.hashedToken).not.toBe(initial.hashedToken);
+        });
     });
 });

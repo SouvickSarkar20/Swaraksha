@@ -9,11 +9,10 @@ import {
 } from "../../lib/token.js";
 import { redis } from "../../redis/client.js";
 
-// Dummy hash used for timing-safe dummy comparisons when a user is not found
 const DUMMY_HASH = "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBPj4h1y/z5/fO";
-
-// 7 days in seconds for Upstash Redis TTL
-const REFRESH_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7;
+const REFRESH_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
+const LOCKOUT_TTL_SECONDS = 60 * 15; // 15 minutes
+const MAX_FAILED_ATTEMPTS = 5;
 
 export class InvalidCredentialsError extends Error {
     constructor(message = "Invalid email or password") {
@@ -29,23 +28,38 @@ export class InvalidRefreshTokenError extends Error {
     }
 }
 
+export class AccountLockedError extends Error {
+    constructor(message = "Account temporarily locked for 15 minutes due to excessive failed attempts.") {
+        super(message);
+        this.name = "AccountLockedError";
+    }
+}
+
+export class TokenTheftDetectedError extends Error {
+    constructor(message = "Token theft or replay attack detected. All active sessions in this family have been revoked.") {
+        super(message);
+        this.name = "TokenTheftDetectedError";
+    }
+}
+
 export interface AuthTokens {
     accessToken: string;
     refreshToken: string;
 }
 
+interface StoredRefreshToken {
+    userId: string;
+    familyId: string;
+    isRotated: boolean;
+}
+
 export class AuthService {
-    /**
-     * Timing-safe and non-enumerating signup.
-     * Never reveals whether the email already exists or not.
-     */
     async signup(email: string, plainPassword: string): Promise<{ success: boolean; message: string }> {
         const existingUser = await db.query.users.findFirst({
             where: eq(users.email, email.toLowerCase()),
         });
 
         if (existingUser) {
-            // Dummy hash to prevent timing attacks revealing the email is taken
             await hashPassword(plainPassword);
             return {
                 success: true,
@@ -65,59 +79,77 @@ export class AuthService {
         };
     }
 
-    /**
-     * Timing-safe login that issues a short-lived access JWT and a long-lived opaque refresh token.
-     */
     async login(email: string, plainPassword: string): Promise<AuthTokens> {
+        const normalizedEmail = email.toLowerCase();
+        const lockoutKey = `failed_logins:${normalizedEmail}`;
+
+        // 1. Check if account is currently locked out
+        const failedAttempts = await redis.get<number>(lockoutKey);
+        if (failedAttempts && failedAttempts >= MAX_FAILED_ATTEMPTS) {
+            throw new AccountLockedError();
+        }
+
         const user = await db.query.users.findFirst({
-            where: eq(users.email, email.toLowerCase()),
+            where: eq(users.email, normalizedEmail),
         });
 
         if (!user) {
-            // Dummy check to prevent timing attacks revealing the email is not registered
             await verifyPassword(plainPassword, DUMMY_HASH);
+            await this.recordFailedAttempt(lockoutKey);
             throw new InvalidCredentialsError();
         }
 
         const isPasswordValid = await verifyPassword(plainPassword, user.passwordHash);
         if (!isPasswordValid) {
+            await this.recordFailedAttempt(lockoutKey);
             throw new InvalidCredentialsError();
         }
 
-        // Generate tokens
-        const accessToken = generateAccessToken({ userId: user.id, email: user.email });
-        const { rawToken, hashedToken } = generateRefreshToken();
+        // 2. Successful login clears failed attempt counter
+        await redis.del(lockoutKey);
 
-        // Store hashed refresh token in Upstash Redis with a 7-day TTL
-        await redis.set(`refresh_token:${hashedToken}`, JSON.stringify({ userId: user.id }), {
+        // 3. Generate tokens with a fresh familyId
+        const accessToken = generateAccessToken({ userId: user.id, email: user.email });
+        const { rawToken, hashedToken, familyId } = generateRefreshToken();
+
+        // 4. Store token and register it inside the family set
+        const storedData: StoredRefreshToken = { userId: user.id, familyId, isRotated: false };
+        await redis.set(`refresh_token:${hashedToken}`, JSON.stringify(storedData), {
             ex: REFRESH_TOKEN_TTL_SECONDS,
         });
+        await redis.sadd(`family_tokens:${familyId}`, hashedToken);
+        await redis.expire(`family_tokens:${familyId}`, REFRESH_TOKEN_TTL_SECONDS);
 
-        return {
-            accessToken,
-            refreshToken: rawToken,
-        };
+        return { accessToken, refreshToken: rawToken };
     }
 
-    /**
-     * Validates a refresh token, rotates it (invalidating the old one), and returns new tokens.
-     */
+    private async recordFailedAttempt(lockoutKey: string): Promise<void> {
+        const newCount = await redis.incr(lockoutKey);
+        if (newCount === 1) {
+            await redis.expire(lockoutKey, LOCKOUT_TTL_SECONDS);
+        }
+    }
+
     async refresh(rawRefreshToken: string): Promise<AuthTokens> {
         const hashedToken = hashRefreshToken(rawRefreshToken);
         const redisKey = `refresh_token:${hashedToken}`;
 
-        const sessionData = await redis.get<string | { userId: string }>(redisKey);
+        const sessionData = await redis.get<string | StoredRefreshToken>(redisKey);
         if (!sessionData) {
             throw new InvalidRefreshTokenError();
         }
 
-        // Upstash SDK sometimes returns parsed JSON directly or as string depending on setup
-        const parsed = typeof sessionData === "string" ? JSON.parse(sessionData) : sessionData;
-        const userId = parsed.userId;
+        const session: StoredRefreshToken =
+            typeof sessionData === "string" ? JSON.parse(sessionData) : sessionData;
 
-        // Look up user to get fresh email for JWT claims
+        // THEFT DETECTION: If token was already rotated, revoke the ENTIRE token family!
+        if (session.isRotated) {
+            await this.revokeTokenFamily(session.familyId);
+            throw new TokenTheftDetectedError();
+        }
+
         const user = await db.query.users.findFirst({
-            where: eq(users.id, userId),
+            where: eq(users.id, session.userId),
         });
 
         if (!user) {
@@ -125,29 +157,50 @@ export class AuthService {
             throw new InvalidRefreshTokenError();
         }
 
-        // ROTATION: Delete the old refresh token so it cannot be used again
-        await redis.del(redisKey);
+        // ROTATION: Mark old token as rotated instead of deleting it immediately
+        session.isRotated = true;
+        await redis.set(redisKey, JSON.stringify(session), { ex: REFRESH_TOKEN_TTL_SECONDS });
 
-        // Issue brand new tokens
+        // Issue brand new token preserving the same familyId
         const accessToken = generateAccessToken({ userId: user.id, email: user.email });
-        const { rawToken: newRawToken, hashedToken: newHashedToken } = generateRefreshToken();
+        const { rawToken: newRawToken, hashedToken: newHashedToken } = generateRefreshToken(session.familyId);
 
-        await redis.set(`refresh_token:${newHashedToken}`, JSON.stringify({ userId: user.id }), {
+        const newStoredData: StoredRefreshToken = {
+            userId: user.id,
+            familyId: session.familyId,
+            isRotated: false,
+        };
+        await redis.set(`refresh_token:${newHashedToken}`, JSON.stringify(newStoredData), {
             ex: REFRESH_TOKEN_TTL_SECONDS,
         });
+        await redis.sadd(`family_tokens:${session.familyId}`, newHashedToken);
+        await redis.expire(`family_tokens:${session.familyId}`, REFRESH_TOKEN_TTL_SECONDS);
 
-        return {
-            accessToken,
-            refreshToken: newRawToken,
-        };
+        return { accessToken, refreshToken: newRawToken };
     }
 
-    /**
-     * Logs out a user by deleting their current refresh token from Upstash Redis.
-     */
+    private async revokeTokenFamily(familyId: string): Promise<void> {
+        const familyKey = `family_tokens:${familyId}`;
+        const allHashes = await redis.smembers(familyKey);
+
+        if (allHashes && allHashes.length > 0) {
+            const keysToDelete = allHashes.map((h) => `refresh_token:${h}`);
+            await redis.del(...keysToDelete);
+        }
+        await redis.del(familyKey);
+    }
+
     async logout(rawRefreshToken: string): Promise<void> {
         const hashedToken = hashRefreshToken(rawRefreshToken);
-        await redis.del(`refresh_token:${hashedToken}`);
+        const sessionData = await redis.get<string | StoredRefreshToken>(`refresh_token:${hashedToken}`);
+
+        if (sessionData) {
+            const session: StoredRefreshToken =
+                typeof sessionData === "string" ? JSON.parse(sessionData) : sessionData;
+            await this.revokeTokenFamily(session.familyId);
+        } else {
+            await redis.del(`refresh_token:${hashedToken}`);
+        }
     }
 }
 

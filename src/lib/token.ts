@@ -2,6 +2,12 @@ import crypto from "node:crypto";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
 
+export interface RefreshTokenData {
+    rawToken: string;
+    hashedToken: string;
+    familyId: string;
+}
+
 export interface AccessTokenPayload {
     userId: string;
     email: string;
@@ -59,10 +65,11 @@ export function verifyAccessToken(token: string): AccessTokenPayload {
  * - `rawToken`: Sent to the client (in HTTP-only cookie or response body).
  * - `hashedToken`: Stored as the key in Upstash Redis.
  */
-export function generateRefreshToken(): { rawToken: string; hashedToken: string } {
+export function generateRefreshToken(existingFamilyId?: string): RefreshTokenData {
     const rawToken = crypto.randomBytes(40).toString("hex");
     const hashedToken = hashRefreshToken(rawToken);
-    return { rawToken, hashedToken };
+    const familyId = existingFamilyId ?? crypto.randomUUID();
+    return { rawToken, hashedToken, familyId };
 }
 
 /**
