@@ -1,6 +1,12 @@
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { users, type User } from "../../db/schema.js";
+import {
+    generateBackupCodes,
+    generateTotpSecret,
+    verifyAndConsumeBackupCode,
+    verifyTotpCode,
+} from "../../lib/mfa.js";
 import { hashPassword, verifyPassword } from "../../lib/password.js";
 import {
     generateAccessToken,
@@ -12,6 +18,7 @@ import { redis } from "../../redis/client.js";
 const DUMMY_HASH = "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBPj4h1y/z5/fO";
 const REFRESH_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 const LOCKOUT_TTL_SECONDS = 60 * 15; // 15 minutes
+const MFA_CHALLENGE_TTL_SECONDS = 60 * 5; // 5 minutes
 const MAX_FAILED_ATTEMPTS = 5;
 
 export class InvalidCredentialsError extends Error {
@@ -42,10 +49,21 @@ export class TokenTheftDetectedError extends Error {
     }
 }
 
+export class InvalidMfaCodeError extends Error {
+    constructor(message = "Invalid 2FA code or emergency backup code") {
+        super(message);
+        this.name = "InvalidMfaCodeError";
+    }
+}
+
 export interface AuthTokens {
     accessToken: string;
     refreshToken: string;
 }
+
+export type LoginResult =
+    | AuthTokens
+    | { mfaRequired: true; challengeToken: string };
 
 interface StoredRefreshToken {
     userId: string;
@@ -79,11 +97,10 @@ export class AuthService {
         };
     }
 
-    async login(email: string, plainPassword: string): Promise<AuthTokens> {
+    async login(email: string, plainPassword: string): Promise<LoginResult> {
         const normalizedEmail = email.toLowerCase();
         const lockoutKey = `failed_logins:${normalizedEmail}`;
 
-        // 1. Check if account is currently locked out
         const failedAttempts = await redis.get<number>(lockoutKey);
         if (failedAttempts && failedAttempts >= MAX_FAILED_ATTEMPTS) {
             throw new AccountLockedError();
@@ -105,14 +122,143 @@ export class AuthService {
             throw new InvalidCredentialsError();
         }
 
-        // 2. Successful login clears failed attempt counter
         await redis.del(lockoutKey);
 
-        // 3. Generate tokens with a fresh familyId
+        // MFA STATE MACHINE CHECK
+        if (user.isMfaEnabled) {
+            const challengeToken = crypto.randomUUID();
+            await redis.set(
+                `mfa_challenge:${challengeToken}`,
+                JSON.stringify({ userId: user.id }),
+                { ex: MFA_CHALLENGE_TTL_SECONDS }
+            );
+            return { mfaRequired: true, challengeToken };
+        }
+
+        return this.issueTokensForUser(user);
+    }
+
+    async verifyMfaLogin(challengeToken: string, code: string): Promise<AuthTokens> {
+        const challengeKey = `mfa_challenge:${challengeToken}`;
+        const challengeData = await redis.get<string | { userId: string }>(challengeKey);
+
+        if (!challengeData) {
+            throw new InvalidCredentialsError("MFA challenge expired or invalid. Please log in again.");
+        }
+
+        const parsed = typeof challengeData === "string" ? JSON.parse(challengeData) : challengeData;
+        const user = await db.query.users.findFirst({
+            where: eq(users.id, parsed.userId),
+        });
+
+        if (!user || !user.totpSecret) {
+            await redis.del(challengeKey);
+            throw new InvalidCredentialsError();
+        }
+
+        // Check TOTP code first
+        let isCodeValid = verifyTotpCode(user.totpSecret, code);
+
+        // If not valid TOTP, check backup recovery codes
+        if (!isCodeValid && user.backupCodes && user.backupCodes.length > 0) {
+            const backupResult = verifyAndConsumeBackupCode(code, user.backupCodes);
+            if (backupResult.isValid) {
+                isCodeValid = true;
+                await db
+                    .update(users)
+                    .set({ backupCodes: backupResult.remainingCodes })
+                    .where(eq(users.id, user.id));
+            }
+        }
+
+        if (!isCodeValid) {
+            await this.recordFailedAttempt(`failed_logins:${user.email}`);
+            throw new InvalidMfaCodeError();
+        }
+
+        await redis.del(challengeKey);
+        return this.issueTokensForUser(user);
+    }
+
+    async setupMfa(userId: string): Promise<{ secret: string; otpauthUrl: string; rawBackupCodes: string[] }> {
+        const user = await db.query.users.findFirst({
+            where: eq(users.id, userId),
+        });
+
+        if (!user) {
+            throw new InvalidCredentialsError("User not found");
+        }
+
+        const { secret, otpauthUrl } = generateTotpSecret(user.email);
+        const { rawCodes, hashedCodes } = generateBackupCodes();
+
+        await db
+            .update(users)
+            .set({
+                totpSecret: secret,
+                backupCodes: hashedCodes,
+                isMfaEnabled: false, // Remains false until verified in enableMfa!
+            })
+            .where(eq(users.id, userId));
+
+        return { secret, otpauthUrl, rawBackupCodes: rawCodes };
+    }
+
+    async enableMfa(userId: string, code: string): Promise<{ success: boolean; message: string }> {
+        const user = await db.query.users.findFirst({
+            where: eq(users.id, userId),
+        });
+
+        if (!user || !user.totpSecret) {
+            throw new InvalidMfaCodeError("MFA setup has not been initiated.");
+        }
+
+        if (!verifyTotpCode(user.totpSecret, code)) {
+            throw new InvalidMfaCodeError("Invalid verification code. Please check your authenticator app.");
+        }
+
+        await db
+            .update(users)
+            .set({ isMfaEnabled: true })
+            .where(eq(users.id, userId));
+
+        return { success: true, message: "Multi-factor authentication enabled successfully." };
+    }
+
+    async disableMfa(userId: string, plainPassword: string, code: string): Promise<{ success: boolean; message: string }> {
+        const user = await db.query.users.findFirst({
+            where: eq(users.id, userId),
+        });
+
+        if (!user) {
+            throw new InvalidCredentialsError("User not found");
+        }
+
+        const isPasswordValid = await verifyPassword(plainPassword, user.passwordHash);
+        if (!isPasswordValid) {
+            throw new InvalidCredentialsError("Incorrect password.");
+        }
+
+        if (!user.totpSecret || !verifyTotpCode(user.totpSecret, code)) {
+            throw new InvalidMfaCodeError("Invalid 2FA code.");
+        }
+
+        await db
+            .update(users)
+            .set({
+                isMfaEnabled: false,
+                totpSecret: null,
+                backupCodes: null,
+            })
+            .where(eq(users.id, userId));
+
+        return { success: true, message: "Multi-factor authentication disabled successfully." };
+    }
+
+    private async issueTokensForUser(user: User): Promise<AuthTokens> {
         const accessToken = generateAccessToken({ userId: user.id, email: user.email });
         const { rawToken, hashedToken, familyId } = generateRefreshToken();
 
-        // 4. Store token and register it inside the family set
         const storedData: StoredRefreshToken = { userId: user.id, familyId, isRotated: false };
         await redis.set(`refresh_token:${hashedToken}`, JSON.stringify(storedData), {
             ex: REFRESH_TOKEN_TTL_SECONDS,
@@ -142,7 +288,6 @@ export class AuthService {
         const session: StoredRefreshToken =
             typeof sessionData === "string" ? JSON.parse(sessionData) : sessionData;
 
-        // THEFT DETECTION: If token was already rotated, revoke the ENTIRE token family!
         if (session.isRotated) {
             await this.revokeTokenFamily(session.familyId);
             throw new TokenTheftDetectedError();
@@ -157,11 +302,9 @@ export class AuthService {
             throw new InvalidRefreshTokenError();
         }
 
-        // ROTATION: Mark old token as rotated instead of deleting it immediately
         session.isRotated = true;
         await redis.set(redisKey, JSON.stringify(session), { ex: REFRESH_TOKEN_TTL_SECONDS });
 
-        // Issue brand new token preserving the same familyId
         const accessToken = generateAccessToken({ userId: user.id, email: user.email });
         const { rawToken: newRawToken, hashedToken: newHashedToken } = generateRefreshToken(session.familyId);
 
