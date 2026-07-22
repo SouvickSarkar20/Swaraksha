@@ -9,10 +9,15 @@ import {
     AccountLockedError,
     authService,
     InvalidCredentialsError,
+    InvalidMfaCodeError,
     InvalidRefreshTokenError,
     TokenTheftDetectedError,
 } from "./auth.service.js";
+
 import {
+    disableMfaSchema,
+    enableMfaSchema,
+    loginMfaSchema,
     loginSchema,
     logoutSchema,
     refreshSchema,
@@ -58,8 +63,8 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
             const { email, password } = parseResult.data;
 
             try {
-                const tokens = await authService.login(email, password);
-                return reply.status(200).send(tokens);
+                const tokensOrChallenge = await authService.login(email, password);
+                return reply.status(200).send(tokensOrChallenge);
             } catch (err) {
                 if (err instanceof AccountLockedError) {
                     return reply.status(429).send({
@@ -77,6 +82,119 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
             }
         }
     );
+
+    fastify.post(
+        "/login/mfa",
+        { preHandler: [rateLimit(loginLimiter)] },
+        async (request, reply) => {
+            const parseResult = loginMfaSchema.safeParse(request.body);
+            if (!parseResult.success) {
+                return reply.status(400).send({
+                    error: "Bad Request",
+                    message: "Validation failed",
+                    details: parseResult.error.format(),
+                });
+            }
+            const { challengeToken, code } = parseResult.data;
+            try {
+                const tokens = await authService.verifyMfaLogin(challengeToken, code);
+                return reply.status(200).send(tokens);
+            } catch (err) {
+                if (err instanceof AccountLockedError) {
+                    return reply.status(429).send({
+                        error: "Too Many Requests",
+                        message: err.message,
+                    });
+                }
+                if (err instanceof InvalidCredentialsError || err instanceof InvalidMfaCodeError) {
+                    return reply.status(401).send({
+                        error: "Unauthorized",
+                        message: err.message,
+                    });
+                }
+                throw err;
+            }
+        }
+    );
+
+    fastify.post(
+        "/mfa/setup",
+        { preHandler: [rateLimit(apiLimiter), authenticate] },
+        async (request, reply) => {
+            try {
+                const setupData = await authService.setupMfa(request.user!.userId);
+                return reply.status(200).send(setupData);
+            } catch (err) {
+                if (err instanceof InvalidCredentialsError) {
+                    return reply.status(401).send({
+                        error: "Unauthorized",
+                        message: err.message,
+                    });
+                }
+                throw err;
+            }
+        }
+    );
+
+    fastify.post(
+        "/mfa/enable",
+        { preHandler: [rateLimit(apiLimiter), authenticate] },
+        async (request, reply) => {
+            const parseResult = enableMfaSchema.safeParse(request.body);
+            if (!parseResult.success) {
+                return reply.status(400).send({
+                    error: "Bad Request",
+                    message: "Validation failed",
+                    details: parseResult.error.format(),
+                });
+            }
+            try {
+                const result = await authService.enableMfa(request.user!.userId, parseResult.data.code);
+                return reply.status(200).send(result);
+            } catch (err) {
+                if (err instanceof InvalidMfaCodeError) {
+                    return reply.status(400).send({
+                        error: "Bad Request",
+                        message: err.message,
+                    });
+                }
+                throw err;
+            }
+        }
+    );
+
+    fastify.post(
+        "/mfa/disable",
+        { preHandler: [rateLimit(apiLimiter), authenticate] },
+        async (request, reply) => {
+            const parseResult = disableMfaSchema.safeParse(request.body);
+            if (!parseResult.success) {
+                return reply.status(400).send({
+                    error: "Bad Request",
+                    message: "Validation failed",
+                    details: parseResult.error.format(),
+                });
+            }
+
+            try {
+                const result = await authService.disableMfa(
+                    request.user!.userId,
+                    parseResult.data.password,
+                    parseResult.data.code
+                );
+                return reply.status(200).send(result);
+            } catch (err) {
+                if (err instanceof InvalidCredentialsError || err instanceof InvalidMfaCodeError) {
+                    return reply.status(401).send({
+                        error: "Unauthorized",
+                        message: err.message,
+                    });
+                }
+                throw err;
+            }
+        }
+    );
+
 
     // POST /refresh (API Rate Limit: 100 per 1m)
     fastify.post(
