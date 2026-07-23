@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client.js";
+import { computeUserPermissions, type UserRole } from "../../lib/rbac.js";
 import { users, type User } from "../../db/schema.js";
 import {
     generateBackupCodes,
@@ -256,7 +257,12 @@ export class AuthService {
     }
 
     private async issueTokensForUser(user: User): Promise<AuthTokens> {
-        const accessToken = generateAccessToken({ userId: user.id, email: user.email });
+        const accessToken = generateAccessToken({
+            userId: user.id,
+            email: user.email,
+            role: user.role, // Embed their primary role
+            permissions: computeUserPermissions(user.role as UserRole, user.permissions || []), // Compute their exact granular scopes
+        });
         const { rawToken, hashedToken, familyId } = generateRefreshToken();
 
         const storedData: StoredRefreshToken = { userId: user.id, familyId, isRotated: false };
@@ -268,6 +274,7 @@ export class AuthService {
 
         return { accessToken, refreshToken: rawToken };
     }
+
 
     private async recordFailedAttempt(lockoutKey: string): Promise<void> {
         const newCount = await redis.incr(lockoutKey);
@@ -305,7 +312,12 @@ export class AuthService {
         session.isRotated = true;
         await redis.set(redisKey, JSON.stringify(session), { ex: REFRESH_TOKEN_TTL_SECONDS });
 
-        const accessToken = generateAccessToken({ userId: user.id, email: user.email });
+        const accessToken = generateAccessToken({
+            userId: user.id,
+            email: user.email,
+            role: user.role,
+            permissions: computeUserPermissions(user.role as UserRole, user.permissions || []),
+        });
         const { rawToken: newRawToken, hashedToken: newHashedToken } = generateRefreshToken(session.familyId);
 
         const newStoredData: StoredRefreshToken = {
