@@ -7,6 +7,8 @@ export const users = pgTable("users", {
     isMfaEnabled: boolean("is_mfa_enabled").default(false).notNull(),
     totpSecret: text("totp_secret"),
     backupCodes: text("backup_codes").array(),
+    role: text("role").default("USER").notNull(),
+    permissions: text("permissions").array().default([]).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
