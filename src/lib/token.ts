@@ -11,6 +11,8 @@ export interface RefreshTokenData {
 export interface AccessTokenPayload {
     userId: string;
     email: string;
+    role: string;
+    permissions: string[];
 }
 
 // Custom domain errors for clean error handling across services and middleware
