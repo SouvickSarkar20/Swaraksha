@@ -1,3 +1,7 @@
+import fastifySwagger from "@fastify/swagger";
+import fastifySwaggerUi from "@fastify/swagger-ui";
+import { adminRoutes } from "./modules/admin/admin.route.js";
+
 import Fastify from "fastify";
 import { env } from "./config/env.js";
 import { authRoutes } from "./modules/auth/auth.route.js";
@@ -9,8 +13,34 @@ const server = Fastify({
     },
 });
 
+// Register Swagger (OpenAPI) documentation BEFORE registering your routes
+server.register(fastifySwagger, {
+    openapi: {
+        info: {
+            title: "Swaraksha Auth API",
+            description: "High-performance Auth API with RBAC, MFA, and Rate Limiting",
+            version: "1.0.0",
+        },
+        components: {
+            securitySchemes: {
+                bearerAuth: {
+                    type: "http",
+                    scheme: "bearer",
+                    bearerFormat: "JWT",
+                },
+            },
+        },
+    },
+});
+
+server.register(fastifySwaggerUi, {
+    routePrefix: "/docs",
+});
+
+
 // Register our authentication routes
 server.register(authRoutes);
+server.register(adminRoutes, { prefix: "/admin" });
 
 // Global Error Handler for uncaught exceptions or custom domain errors
 server.setErrorHandler((error: any, request, reply) => {

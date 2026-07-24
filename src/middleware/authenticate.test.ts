@@ -20,6 +20,8 @@ describe("Authenticate Middleware Unit Tests", () => {
         const validToken = generateAccessToken({
             userId: "uuid-123",
             email: "test@example.com",
+            role: "USER",
+            permissions: ["read:profile"],
         });
         mockRequest.headers.authorization = `Bearer ${validToken}`;
 
