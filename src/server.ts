@@ -1,9 +1,15 @@
 import fastifySwagger from "@fastify/swagger";
 import fastifySwaggerUi from "@fastify/swagger-ui";
-import { adminRoutes } from "./modules/admin/admin.route.js";
-
 import Fastify from "fastify";
+import { 
+  serializerCompiler, 
+  validatorCompiler, 
+  jsonSchemaTransform,
+  hasZodFastifySchemaValidationErrors 
+} from "fastify-type-provider-zod";
+
 import { env } from "./config/env.js";
+import { adminRoutes } from "./modules/admin/admin.route.js";
 import { authRoutes } from "./modules/auth/auth.route.js";
 
 // Instantiate Fastify with built-in Pino logger
@@ -12,6 +18,10 @@ const server = Fastify({
         level: env.NODE_ENV === "test" ? "silent" : "info",
     },
 });
+
+// Set Zod Compilers for automatic validation & serialization
+server.setValidatorCompiler(validatorCompiler);
+server.setSerializerCompiler(serializerCompiler);
 
 // Register Swagger (OpenAPI) documentation BEFORE registering your routes
 server.register(fastifySwagger, {
@@ -31,19 +41,28 @@ server.register(fastifySwagger, {
             },
         },
     },
+    transform: jsonSchemaTransform, // MAGIC: Automatically converts Zod to OpenAPI
 });
 
 server.register(fastifySwaggerUi, {
     routePrefix: "/docs",
 });
 
-
-// Register our authentication routes
+// Register our application routes
 server.register(authRoutes);
 server.register(adminRoutes, { prefix: "/admin" });
 
 // Global Error Handler for uncaught exceptions or custom domain errors
 server.setErrorHandler((error: any, request, reply) => {
+    // Intercept automatic Zod validation errors to format them nicely
+    if (hasZodFastifySchemaValidationErrors(error)) {
+        return reply.status(400).send({
+            error: "Bad Request",
+            message: "Validation failed",
+            details: error.validation,
+        });
+    }
+
     server.log.error(error);
 
     const statusCode = error.statusCode ?? 500;

@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { authenticate } from "../../middleware/authenticate.js";
 import {
     apiLimiter,
@@ -24,24 +25,21 @@ import {
     signupSchema,
 } from "./auth.schema.js";
 
-export async function authRoutes(fastify: FastifyInstance): Promise<void> {
+export async function authRoutes(fastifyApp: FastifyInstance): Promise<void> {
+    // 1. Wrap the fastify instance with the ZodTypeProvider!
+    const fastify = fastifyApp.withTypeProvider<ZodTypeProvider>();
+
     // POST /signup (Strict Rate Limit: 5 per 15m)
     fastify.post(
         "/signup",
-        { preHandler: [rateLimit(loginLimiter)] },
+        { 
+            preHandler: [rateLimit(loginLimiter)],
+            schema: { body: signupSchema } // 2. Attach schema here! Swagger reads this instantly.
+        },
         async (request, reply) => {
-            const parseResult = signupSchema.safeParse(request.body);
-            if (!parseResult.success) {
-                return reply.status(400).send({
-                    error: "Bad Request",
-                    message: "Validation failed",
-                    details: parseResult.error.format(),
-                });
-            }
-
-            const { email, password } = parseResult.data;
+            // 3. request.body is automatically validated and strictly typed! No more .safeParse()!
+            const { email, password } = request.body;
             const result = await authService.signup(email, password);
-
             return reply.status(201).send(result);
         }
     );
@@ -49,19 +47,12 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
     // POST /login (Strict Rate Limit: 5 per 15m)
     fastify.post(
         "/login",
-        { preHandler: [rateLimit(loginLimiter)] },
+        { 
+            preHandler: [rateLimit(loginLimiter)],
+            schema: { body: loginSchema }
+        },
         async (request, reply) => {
-            const parseResult = loginSchema.safeParse(request.body);
-            if (!parseResult.success) {
-                return reply.status(400).send({
-                    error: "Bad Request",
-                    message: "Validation failed",
-                    details: parseResult.error.format(),
-                });
-            }
-
-            const { email, password } = parseResult.data;
-
+            const { email, password } = request.body;
             try {
                 const tokensOrChallenge = await authService.login(email, password);
                 return reply.status(200).send(tokensOrChallenge);
@@ -85,17 +76,12 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
 
     fastify.post(
         "/login/mfa",
-        { preHandler: [rateLimit(loginLimiter)] },
+        { 
+            preHandler: [rateLimit(loginLimiter)],
+            schema: { body: loginMfaSchema }
+        },
         async (request, reply) => {
-            const parseResult = loginMfaSchema.safeParse(request.body);
-            if (!parseResult.success) {
-                return reply.status(400).send({
-                    error: "Bad Request",
-                    message: "Validation failed",
-                    details: parseResult.error.format(),
-                });
-            }
-            const { challengeToken, code } = parseResult.data;
+            const { challengeToken, code } = request.body;
             try {
                 const tokens = await authService.verifyMfaLogin(challengeToken, code);
                 return reply.status(200).send(tokens);
@@ -119,7 +105,10 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
 
     fastify.post(
         "/mfa/setup",
-        { preHandler: [rateLimit(apiLimiter), authenticate] },
+        { 
+            preHandler: [rateLimit(apiLimiter), authenticate],
+            schema: { security: [{ bearerAuth: [] }] }
+        },
         async (request, reply) => {
             try {
                 const setupData = await authService.setupMfa(request.user!.userId);
@@ -138,18 +127,16 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
 
     fastify.post(
         "/mfa/enable",
-        { preHandler: [rateLimit(apiLimiter), authenticate] },
-        async (request, reply) => {
-            const parseResult = enableMfaSchema.safeParse(request.body);
-            if (!parseResult.success) {
-                return reply.status(400).send({
-                    error: "Bad Request",
-                    message: "Validation failed",
-                    details: parseResult.error.format(),
-                });
+        { 
+            preHandler: [rateLimit(apiLimiter), authenticate],
+            schema: { 
+                body: enableMfaSchema,
+                security: [{ bearerAuth: [] }]
             }
+        },
+        async (request, reply) => {
             try {
-                const result = await authService.enableMfa(request.user!.userId, parseResult.data.code);
+                const result = await authService.enableMfa(request.user!.userId, request.body.code);
                 return reply.status(200).send(result);
             } catch (err) {
                 if (err instanceof InvalidMfaCodeError) {
@@ -165,22 +152,19 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
 
     fastify.post(
         "/mfa/disable",
-        { preHandler: [rateLimit(apiLimiter), authenticate] },
-        async (request, reply) => {
-            const parseResult = disableMfaSchema.safeParse(request.body);
-            if (!parseResult.success) {
-                return reply.status(400).send({
-                    error: "Bad Request",
-                    message: "Validation failed",
-                    details: parseResult.error.format(),
-                });
+        { 
+            preHandler: [rateLimit(apiLimiter), authenticate],
+            schema: { 
+                body: disableMfaSchema,
+                security: [{ bearerAuth: [] }]
             }
-
+        },
+        async (request, reply) => {
             try {
                 const result = await authService.disableMfa(
                     request.user!.userId,
-                    parseResult.data.password,
-                    parseResult.data.code
+                    request.body.password,
+                    request.body.code
                 );
                 return reply.status(200).send(result);
             } catch (err) {
@@ -195,23 +179,16 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
         }
     );
 
-
     // POST /refresh (API Rate Limit: 100 per 1m)
     fastify.post(
         "/refresh",
-        { preHandler: [rateLimit(apiLimiter)] },
+        { 
+            preHandler: [rateLimit(apiLimiter)],
+            schema: { body: refreshSchema }
+        },
         async (request, reply) => {
-            const parseResult = refreshSchema.safeParse(request.body);
-            if (!parseResult.success) {
-                return reply.status(400).send({
-                    error: "Bad Request",
-                    message: "Validation failed",
-                    details: parseResult.error.format(),
-                });
-            }
-
             try {
-                const tokens = await authService.refresh(parseResult.data.refreshToken);
+                const tokens = await authService.refresh(request.body.refreshToken);
                 return reply.status(200).send(tokens);
             } catch (err) {
                 if (err instanceof TokenTheftDetectedError) {
@@ -234,18 +211,12 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
     // POST /logout (API Rate Limit: 100 per 1m)
     fastify.post(
         "/logout",
-        { preHandler: [rateLimit(apiLimiter)] },
+        { 
+            preHandler: [rateLimit(apiLimiter)],
+            schema: { body: logoutSchema }
+        },
         async (request, reply) => {
-            const parseResult = logoutSchema.safeParse(request.body);
-            if (!parseResult.success) {
-                return reply.status(400).send({
-                    error: "Bad Request",
-                    message: "Validation failed",
-                    details: parseResult.error.format(),
-                });
-            }
-
-            await authService.logout(parseResult.data.refreshToken);
+            await authService.logout(request.body.refreshToken);
             return reply
                 .status(200)
                 .send({ success: true, message: "Logged out successfully" });
@@ -255,7 +226,10 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
     // GET /me (Protected route via JWT + API Rate Limit)
     fastify.get(
         "/me",
-        { preHandler: [rateLimit(apiLimiter), authenticate] },
+        { 
+            preHandler: [rateLimit(apiLimiter), authenticate],
+            schema: { security: [{ bearerAuth: [] }] }
+        },
         async (request, reply) => {
             return reply.status(200).send({
                 user: request.user,
