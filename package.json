@@ -9,7 +9,8 @@
         "start": "node dist/server.js",
         "test": "vitest",
         "db:generate": "drizzle-kit generate",
-        "db:migrate": "drizzle-kit migrate",
+        "db:migrate:dev": "tsx src/db/migrate.ts",
+        "db:migrate:prod": "node dist/db/migrate.js",
         "db:studio": "drizzle-kit studio"
     },
     "dependencies": {

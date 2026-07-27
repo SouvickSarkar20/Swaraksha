@@ -46,6 +46,9 @@ RUN npm ci --omit=dev
 # Copy the compiled /dist folder from the Builder stage
 COPY --from=builder /app/dist ./dist
 
+# Copy the database migrations folder so we can run migrations in production
+COPY drizzle ./drizzle
+
 # Change ownership of the /app directory to the non-root user
 RUN chown -R appuser:appgroup /app
 
