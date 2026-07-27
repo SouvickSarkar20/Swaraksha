@@ -88,6 +88,24 @@ const start = async () => {
     }
 };
 
+// Graceful Shutdown Logic (Phase 2)
+// This intercepts Docker or system termination signals to prevent dropping active requests!
+const closeGracefully = async (signal: string) => {
+    console.log(`\n[Graceful Shutdown] Received ${signal}...`);
+    try {
+        // server.close() stops accepting new requests, but waits for existing ones to finish!
+        await server.close();
+        console.log("[Graceful Shutdown] Fastify server closed successfully.");
+        process.exit(0);
+    } catch (err) {
+        server.log.error(err);
+        process.exit(1);
+    }
+};
+
+process.on("SIGINT", () => closeGracefully("SIGINT"));
+process.on("SIGTERM", () => closeGracefully("SIGTERM"));
+
 // Only start listening if this file is run directly (not imported during testing)
 if (process.env.NODE_ENV !== "test") {
     start();

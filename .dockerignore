@@ -1,0 +1,28 @@
+# Dependency directories
+node_modules/
+npm-debug.log
+npm-debug.log.*
+yarn-error.log
+yarn-debug.log*
+
+# Build outputs
+dist/
+
+# Env files (NEVER copy these into a Docker image!)
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+
+# Git
+.git
+.gitignore
+
+# Testing & Coverage
+coverage/
+vitest.config.ts
+**/*.test.ts
+
+# Misc
+*.md

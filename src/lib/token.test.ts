@@ -13,7 +13,7 @@ import {
 describe("Token Generation & Verification Utility", () => {
     describe("Access Tokens (JWT)", () => {
         it("should generate a valid JWT and decode its payload cleanly", () => {
-            const payload = { userId: "user-123", email: "test@example.com" };
+            const payload = { userId: "user-123", email: "test@example.com", role: "USER" as const, permissions: [] };
             const token = generateAccessToken(payload);
 
             expect(typeof token).toBe("string");
@@ -25,7 +25,7 @@ describe("Token Generation & Verification Utility", () => {
 
         it("should throw ExpiredTokenError when verifying an expired JWT", () => {
             // Create a token that expired 1 second ago
-            const expiredToken = jwt.sign({ userId: "user-123", email: "test@example.com" }, env.JWT_SECRET, {
+            const expiredToken = jwt.sign({ userId: "user-123", email: "test@example.com", role: "USER", permissions: [] }, env.JWT_SECRET, {
                 expiresIn: "-1s",
             });
 
@@ -33,7 +33,7 @@ describe("Token Generation & Verification Utility", () => {
         });
 
         it("should throw InvalidTokenError when verifying a tampered/malformed JWT", () => {
-            const token = generateAccessToken({ userId: "user-123", email: "test@example.com" });
+            const token = generateAccessToken({ userId: "user-123", email: "test@example.com", role: "USER", permissions: [] });
             const tamperedToken = token + "tampered";
 
             expect(() => verifyAccessToken(tamperedToken)).toThrow(InvalidTokenError);

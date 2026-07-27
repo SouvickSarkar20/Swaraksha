@@ -1,0 +1,41 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          # This automatically caches the node_modules folder to drastically speed up CI runs!
+          cache: "npm"
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🔎 Run Type Checking
+        # We run the build script to ensure strict TypeScript compilation passes
+        run: npm run build
+
+      - name: 🧪 Run Unit Tests (Vitest)
+        run: npm run test
+        env:
+          # We supply a dummy secret so the tests that rely on JWT generation don't fail in CI
+          JWT_SECRET: "test-secret-key-that-is-at-least-32-chars-long"
+
+      - name: 🐳 Verify Docker Build (Phase 1 execution)
+        # We run the Docker build in CI to ensure our multi-stage Dockerfile works flawlessly
+        # (We will add the push-to-registry step in Phase 6: CD Pipeline)
+        run: docker build -t swaraksha-api:test .
