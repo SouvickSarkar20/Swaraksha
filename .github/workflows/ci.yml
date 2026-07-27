@@ -32,8 +32,11 @@ jobs:
       - name: 🧪 Run Unit Tests (Vitest)
         run: npm run test
         env:
-          # We supply a dummy secret so the tests that rely on JWT generation don't fail in CI
+          # We supply dummy secrets so env.ts validation doesn't crash the CI runner!
           JWT_SECRET: "test-secret-key-that-is-at-least-32-chars-long"
+          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/dummy"
+          REDIS_URL: "https://dummy.upstash.io"
+          REDIS_TOKEN: "dummy_token"
 
       - name: 🐳 Verify Docker Build (Phase 1 execution)
         # We run the Docker build in CI to ensure our multi-stage Dockerfile works flawlessly
