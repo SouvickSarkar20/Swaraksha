@@ -106,7 +106,14 @@ jobs:
             # 4. Run migrations in a one-off container before restarting the service
             docker run --rm --env-file /root/.env ghcr.io/$LOWER_REPO/swaraksha-api:latest node dist/db/migrate.js
 
-            # 5. Copy docker-compose blueprint
+            # 5. Generate Caddyfile for Reverse Proxy
+            cat <<EOF > /root/Caddyfile
+            http://${{ secrets.DROPLET_IP }} {
+                reverse_proxy api:3000
+            }
+            EOF
+
+            # 6. Copy docker-compose blueprint with Caddy
             cat <<EOF > /root/docker-compose.yml
             version: "3.8"
             services:
@@ -114,8 +121,8 @@ jobs:
                 image: ghcr.io/$LOWER_REPO/swaraksha-api:latest
                 container_name: swaraksha-api
                 restart: unless-stopped
-                ports:
-                  - "3000:3000"
+                # Port 3000 is intentionally NOT exposed to the host for security!
+                # Only Caddy can talk to it over the internal Docker network.
                 env_file:
                   - .env
                 command: ["node", "dist/server.js"]
@@ -124,6 +131,25 @@ jobs:
                   interval: 10s
                   timeout: 5s
                   retries: 5
+
+              caddy:
+                image: caddy:2-alpine
+                container_name: caddy-proxy
+                restart: unless-stopped
+                ports:
+                  - "80:80"
+                  - "443:443"
+                volumes:
+                  - ./Caddyfile:/etc/caddy/Caddyfile
+                  - caddy_data:/data
+                  - caddy_config:/config
+                depends_on:
+                  api:
+                    condition: service_healthy
+
+            volumes:
+              caddy_data:
+              caddy_config:
             EOF
 
             # 6. Stop old container and recreate from latest image
