@@ -119,7 +119,22 @@ jobs:
 
             # 5. Stop old container, start new container seamlessly
             cd /root
-            docker-compose up -d
+            docker compose up -d
 
-            # 6. Run Production Database Migrations safely INSIDE the new container!
+            # 6. Wait until the container is running before migrating
+            for i in {1..30}; do
+              if docker ps --filter "name=^/swaraksha-api$" --filter "status=running" --format '{{.Names}}' | grep -q '^swaraksha-api$'; then
+                break
+              fi
+              sleep 2
+            done
+
+            # 7. Fail fast if the container never started
+            if ! docker ps --filter "name=^/swaraksha-api$" --filter "status=running" --format '{{.Names}}' | grep -q '^swaraksha-api$'; then
+              echo "Container swaraksha-api did not start"
+              docker ps -a
+              exit 1
+            fi
+
+            # 8. Run Production Database Migrations safely INSIDE the new container
             docker exec swaraksha-api node dist/db/migrate.js
