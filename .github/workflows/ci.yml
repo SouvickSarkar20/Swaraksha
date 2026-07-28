@@ -103,7 +103,10 @@ jobs:
             JWT_SECRET=${{ secrets.PROD_JWT_SECRET }}
             EOF
 
-            # 4. Copy docker-compose blueprint
+            # 4. Run migrations in a one-off container before restarting the service
+            docker run --rm --env-file /root/.env ghcr.io/$LOWER_REPO/swaraksha-api:latest node dist/db/migrate.js
+
+            # 5. Copy docker-compose blueprint
             cat <<EOF > /root/docker-compose.yml
             version: "3.8"
             services:
@@ -123,12 +126,12 @@ jobs:
                   retries: 5
             EOF
 
-            # 5. Stop old container and recreate from latest image
+            # 6. Stop old container and recreate from latest image
             cd /root
             docker compose pull
             docker compose up -d --remove-orphans --force-recreate
 
-            # 6. Wait until container is running
+            # 7. Wait until container is running
             for i in {1..30}; do
               if docker ps --filter "name=^/swaraksha-api$" --filter "status=running" --format '{{.Names}}' | grep -q '^swaraksha-api$'; then
                 echo "swaraksha-api is running"
@@ -137,13 +140,10 @@ jobs:
               sleep 2
             done
 
-            # 7. Fail fast + print diagnostics if it never started
+            # 8. Fail fast + print diagnostics if it never started
             if ! docker ps --filter "name=^/swaraksha-api$" --filter "status=running" --format '{{.Names}}' | grep -q '^swaraksha-api$'; then
               echo "Container swaraksha-api did not start"
               docker ps -a
               docker logs --tail=200 swaraksha-api || true
               exit 1
             fi
-
-            # 8. Run migrations
-            docker exec swaraksha-api node dist/db/migrate.js
