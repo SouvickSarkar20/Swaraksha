@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: ["main"]
 
+# Grant the GITHUB_TOKEN permission to push Docker images to the registry
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build-and-test:
     name: Build & Test
@@ -39,6 +44,82 @@ jobs:
           REDIS_TOKEN: "dummy_token"
 
       - name: 🐳 Verify Docker Build (Phase 1 execution)
-        # We run the Docker build in CI to ensure our multi-stage Dockerfile works flawlessly
-        # (We will add the push-to-registry step in Phase 6: CD Pipeline)
         run: docker build -t swaraksha-api:test .
+
+  deploy:
+    name: 🚀 Deploy to Production
+    needs: build-and-test
+    # ONLY run deployment if the code was pushed to main (not on Pull Requests)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔐 Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          # Use the automatic GITHUB_TOKEN to authenticate
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🐳 Build and Push Docker image
+        run: |
+          # The repository name needs to be lowercase for Docker tags
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          docker build -t ghcr.io/$REPO/swaraksha-api:latest .
+          docker push ghcr.io/$REPO/swaraksha-api:latest
+
+      - name: 🚀 Deploy to DigitalOcean Droplet
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          # Pass the temporary GitHub token so the server can download the private image
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        with:
+          host: ${{ secrets.DROPLET_IP }}
+          username: root
+          password: ${{ secrets.DROPLET_PASSWORD }}
+          envs: GH_TOKEN,REPO
+          script: |
+            # Convert REPO to lowercase
+            LOWER_REPO=$(echo "$REPO" | tr '[:upper:]' '[:lower:]')
+
+            # 1. Login to GHCR on the Droplet
+            echo "$GH_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # 2. Pull the latest image
+            docker pull ghcr.io/$LOWER_REPO/swaraksha-api:latest
+
+            # 3. Securely inject GitHub Secrets into the production .env file
+            cat <<EOF > /root/.env
+            PORT=3000
+            NODE_ENV=production
+            DATABASE_URL=${{ secrets.PROD_DATABASE_URL }}
+            REDIS_URL=${{ secrets.PROD_REDIS_URL }}
+            REDIS_TOKEN=${{ secrets.PROD_REDIS_TOKEN }}
+            JWT_SECRET=${{ secrets.PROD_JWT_SECRET }}
+            EOF
+
+            # 4. Copy docker-compose blueprint
+            cat <<EOF > /root/docker-compose.yml
+            version: "3.8"
+            services:
+              api:
+                image: ghcr.io/$LOWER_REPO/swaraksha-api:latest
+                container_name: swaraksha-api
+                restart: unless-stopped
+                ports:
+                  - "3000:3000"
+                env_file:
+                  - .env
+            EOF
+
+            # 5. Stop old container, start new container seamlessly
+            cd /root
+            docker-compose up -d
+
+            # 6. Run Production Database Migrations safely INSIDE the new container!
+            docker exec swaraksha-api node dist/db/migrate.js
