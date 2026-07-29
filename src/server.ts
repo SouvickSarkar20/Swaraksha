@@ -1,6 +1,8 @@
 import fastifySwagger from "@fastify/swagger";
 import fastifySwaggerUi from "@fastify/swagger-ui";
 import Fastify from "fastify";
+import * as Sentry from "@sentry/node";
+import { nodeProfilingIntegration } from "@sentry/profiling-node";
 import { 
   serializerCompiler, 
   validatorCompiler, 
@@ -11,6 +13,19 @@ import {
 import { env } from "./config/env.js";
 import { adminRoutes } from "./modules/admin/admin.route.js";
 import { authRoutes } from "./modules/auth/auth.route.js";
+
+// Initialize Sentry before anything else if the DSN is provided
+if (env.SENTRY_DSN) {
+    Sentry.init({
+        dsn: env.SENTRY_DSN,
+        integrations: [
+            nodeProfilingIntegration(),
+        ],
+        tracesSampleRate: 1.0,
+        profilesSampleRate: 1.0,
+    });
+    console.log("✅ Sentry Error Tracking & Profiling initialized");
+}
 
 // Instantiate Fastify with built-in Pino logger
 const server = Fastify({
@@ -48,6 +63,11 @@ server.register(fastifySwaggerUi, {
     routePrefix: "/docs",
 });
 
+// Healthcheck endpoint for UptimeRobot
+server.get("/health", async () => {
+    return { status: "ok", uptime: process.uptime(), timestamp: new Date().toISOString() };
+});
+
 // Register our application routes
 server.register(authRoutes);
 server.register(adminRoutes, { prefix: "/admin" });
@@ -61,6 +81,11 @@ server.setErrorHandler((error: any, request, reply) => {
             message: "Validation failed",
             details: error.validation,
         });
+    }
+
+    // Capture unhandled application exceptions in Sentry
+    if (env.SENTRY_DSN) {
+        Sentry.captureException(error);
     }
 
     server.log.error(error);

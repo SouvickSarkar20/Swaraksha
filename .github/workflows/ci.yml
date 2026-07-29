@@ -101,6 +101,7 @@ jobs:
             REDIS_URL=${{ secrets.PROD_REDIS_URL }}
             REDIS_TOKEN=${{ secrets.PROD_REDIS_TOKEN }}
             JWT_SECRET=${{ secrets.PROD_JWT_SECRET }}
+            SENTRY_DSN=${{ secrets.PROD_SENTRY_DSN }}
             EOF
 
             # 4. Run migrations in a one-off container before restarting the service

@@ -11,6 +11,7 @@ const envSchema = z.object({
     REDIS_URL: z.string().url("REDIS_URL must be a valid Upstash URL"),
     REDIS_TOKEN: z.string().min(1, "REDIS_TOKEN is required"),
     JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 characters long for security"),
+    SENTRY_DSN: z.string().url().optional(),
 });
 
 // Parse and validate process.env
