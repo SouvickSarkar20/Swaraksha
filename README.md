@@ -2,7 +2,7 @@
 
 A battle-tested authentication API built from scratch with **TypeScript**, **Fastify**, and **PostgreSQL**. This project implements every security feature a real-world auth system needs — JWT tokens, refresh token rotation, MFA (TOTP), role-based access control (RBAC), account lockouts, and rate limiting — all deployed via a fully automated CI/CD pipeline to a cloud server.
 
-> 📖 **Deep Dive:** For a detailed walkthrough of every feature, design decision, and the deployment journey, read the full article on [dev.to →](https://dev.to/souvicksarkar20/TODO-article-slug)
+> 📖 **Deep Dive:** For a detailed walkthrough of every feature, design decision, and the deployment journey, read the full article on [dev.to →](https://dev.to/souvick_20/i-built-a-production-grade-auth-api-from-scratch-heres-everything-i-learned-3on3)
 
 ---
 
