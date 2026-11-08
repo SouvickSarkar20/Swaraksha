@@ -28,9 +28,6 @@ A battle-tested authentication API built from scratch with **TypeScript**, **Fas
 
 The API is deployed and running on a DigitalOcean Droplet behind a Caddy reverse proxy.
 
-- **Swagger Docs:** [http://168.144.117.195/docs](http://168.144.117.195/docs)
-- **Health Check:** [http://168.144.117.195/health](http://168.144.117.195/health)
-
 ---
 
 ## Tech Stack
